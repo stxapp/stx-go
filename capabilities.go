@@ -23,19 +23,12 @@ const (
 	FeatureEventPlayers  = "event_players"
 	FeatureLeaderboard   = "leaderboard"
 	FeatureCombos        = "combos"
-	// FeatureOrdersPostOnly: GET /api_version lists "order_post_only" in
-	// its features. No features field, or no /api_version, means no.
-	FeatureOrdersPostOnly = "orders.post_only"
-	// FeatureOrdersFillOrKill: GET /api_version lists "order_fill_or_kill",
-	// decided the same way.
-	FeatureOrdersFillOrKill = "orders.fill_or_kill"
 )
 
 // Features returns every feature id [Client.Capabilities] reports.
 func Features() []string {
 	return []string{FeatureOAuth, FeatureOAuthMember, FeatureOAuthApp, FeatureConnect, FeatureTermsSTXPage,
-		FeatureMarketsCreate, FeatureMarketTypes, FeatureEventPlayers, FeatureLeaderboard, FeatureCombos,
-		FeatureOrdersPostOnly, FeatureOrdersFillOrKill}
+		FeatureMarketsCreate, FeatureMarketTypes, FeatureEventPlayers, FeatureLeaderboard, FeatureCombos}
 }
 
 // memberScopes: any one of them in scopes_supported means members can
@@ -179,7 +172,7 @@ func (c *Client) discoverCapabilities(ctx context.Context) *Capabilities {
 	var combos *bool
 	var wg sync.WaitGroup
 	run := func(f func()) { wg.Add(1); go func() { defer wg.Done(); f() }() }
-	run(func() { version, versionErr = c.apiVersionInfo(ctx, true) })
+	run(func() { version, versionErr = c.fetchAPIVersion(ctx) })
 	run(func() { discovery = c.rawGet(ctx, "/.well-known/oauth-authorization-server", false) })
 	run(func() { types = c.rawGet(ctx, "/api/v1/types", true) })
 	run(func() { players = c.rawGet(ctx, "/api/v1/events/"+nobody+"/players", true) })
@@ -238,10 +231,6 @@ func (c *Client) discoverCapabilities(ctx context.Context) *Capabilities {
 		f[FeatureLeaderboard] = ptr(false)
 	}
 	f[FeatureCombos] = combos
-	if versionErr == nil {
-		f[FeatureOrdersPostOnly] = ptr(slices.Contains(version.features, "order_"+PostOnly))
-		f[FeatureOrdersFillOrKill] = ptr(slices.Contains(version.features, "order_"+FillOrKill))
-	}
 	for _, id := range Features() {
 		if _, ok := f[id]; !ok {
 			f[id] = nil

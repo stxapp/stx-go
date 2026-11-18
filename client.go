@@ -44,8 +44,7 @@ type Client struct {
 	userAgent  string
 	sleep      func(context.Context, time.Duration) error
 
-	caps       capsCache
-	apiVersion apiVersionCache
+	caps capsCache
 }
 
 // Option configures a [Client].

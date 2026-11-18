@@ -80,9 +80,9 @@ func main() {
 	}
 	fmt.Println("canceled", canceled.OrderID, canceled.Status)
 
-	// Rest only as a maker. Where the exchange has no post-only orders nothing is
-	// sent and the error matches stx.ErrNotAvailable; one that would match is a
-	// *stx.PostOnlyWouldMatchError.
+	// Rest only as a maker. Where the exchange has not enabled post-only orders
+	// it rejects the order and the error matches stx.ErrNotAvailable; one that
+	// would match is a *stx.PostOnlyWouldMatchError.
 	maker, err := client.Orders.Place(ctx, stx.OrderRequest{
 		MarketID:  page.Items[0].MarketID,
 		Action:    stx.Buy,

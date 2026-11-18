@@ -4,12 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"strings"
-	"sync"
 )
 
 // Fill modes for a limit order; see OrderRequest.FillMode.
@@ -34,40 +31,10 @@ func fillModeFeature(mode string) string { return "orders." + mode }
 // normal order.
 func specialFillMode(mode string) bool { return mode != "" && mode != FillNormal }
 
-// apiVersion is what GET /api_version answered. features is nil for a build
-// without the list, and for an exchange without the route.
+// apiVersion is the build GET /api_version names, "" when the exchange
+// does not serve the route.
 type apiVersion struct {
-	version  string
-	features []string
-}
-
-type apiVersionCache struct {
-	mu sync.Mutex
-	v  *apiVersion
-}
-
-// apiVersionInfo returns GET /api_version, cached on the client. A 200 or a
-// 404 is kept until refresh; any other answer is an error and is asked again
-// next time.
-func (c *Client) apiVersionInfo(ctx context.Context, refresh bool) (*apiVersion, error) {
-	cache := &c.apiVersion
-	cache.mu.Lock()
-	defer cache.mu.Unlock()
-	if cache.v != nil && !refresh {
-		return cache.v, nil
-	}
-	v, err := c.fetchAPIVersion(ctx)
-	if err != nil {
-		return nil, err
-	}
-	cache.v = v
-	return v, nil
-}
-
-func (c *Client) forgetAPIVersion() {
-	c.apiVersion.mu.Lock()
-	c.apiVersion.v = nil
-	c.apiVersion.mu.Unlock()
+	version string
 }
 
 func (c *Client) fetchAPIVersion(ctx context.Context) (*apiVersion, error) {
@@ -90,65 +57,28 @@ func (c *Client) fetchAPIVersion(ctx context.Context) (*apiVersion, error) {
 		return nil, &TransportError{Method: http.MethodGet, Path: path, Err: err}
 	}
 	if res.StatusCode == http.StatusNotFound {
-		// An exchange from before /api_version has none of the newer features.
 		return &apiVersion{}, nil
 	}
 	if res.StatusCode == http.StatusForbidden && res.Header.Get("X-Stx-Error") == "" && !json.Valid(body) {
-		// The exchange's firewall does not let /api_version through, so it
-		// publishes no features: none is assumed rather than sending a mode
-		// that might be dropped.
+		// The exchange's firewall does not let /api_version through.
 		return &apiVersion{}, nil
 	}
 	if res.StatusCode != http.StatusOK {
 		return nil, newAPIError(res.StatusCode, http.MethodGet, path, body, res.Header.Get)
 	}
 	var doc struct {
-		APIVersion string   `json:"api_version"`
-		Features   []string `json:"features"`
+		APIVersion string `json:"api_version"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return nil, &APIError{StatusCode: res.StatusCode, Method: http.MethodGet, Path: path, Body: body,
 			Message: "expected a JSON object, got " + truncate(string(body), 200)}
 	}
-	// No features field: a build from before the list, so none of the
-	// listed features.
-	return &apiVersion{version: doc.APIVersion, features: doc.Features}, nil
-}
-
-// SupportsFillMode reports whether this exchange takes mode ([PostOnly],
-// [FillOrKill]) on a limit order: GET /api_version lists "order_<mode>" in
-// its features. An exchange whose answer has no features, or that does not
-// serve /api_version (a 404, or a 403 from its firewall with no JSON), takes
-// neither. [FillNormal] is always taken. The answer is
-// cached on the client; pass refresh to ask again. An error means the
-// exchange could not be asked.
-func (c *Client) SupportsFillMode(ctx context.Context, mode string, refresh bool) (bool, error) {
-	if !specialFillMode(mode) {
-		return true, nil
-	}
-	v, err := c.apiVersionInfo(ctx, refresh)
-	if err != nil {
-		return false, err
-	}
-	return slices.Contains(v.features, "order_"+mode), nil
-}
-
-// requireFillMode returns a *NotAvailableError unless the exchange takes
-// mode.
-func (c *Client) requireFillMode(ctx context.Context, mode string) error {
-	ok, err := c.SupportsFillMode(ctx, mode, false)
-	if err != nil {
-		return fmt.Errorf("stx: checking whether %s takes %s orders: %w", c.host, mode, err)
-	}
-	if !ok {
-		return &NotAvailableError{Feature: fillModeFeature(mode), Host: c.host}
-	}
-	return nil
+	return &apiVersion{version: doc.APIVersion}, nil
 }
 
 // fillModeError makes a fill-mode refusal of an order POST specific, or
-// returns nil. A mode switched off on the exchange is a 400 "fill_mode
-// post_only is not enabled"; a market that does not take it is a 422 "This
+// returns nil. A mode the exchange has not enabled is a 400 "fill_mode
+// post_only is not enabled", and becomes a *[NotAvailableError]; a market that does not take it is a 422 "This
 // market does not accept the post_only fill mode"; a post-only order whose
 // first match is the member's own order is a 422 match_with_self.
 func (c *Client) fillModeError(err error, mode string) error {
@@ -157,14 +87,18 @@ func (c *Client) fillModeError(err error, mode string) error {
 		return nil
 	}
 	switch {
-	case apiErr.StatusCode == 400 && apiErr.Message == "fill_mode "+mode+" is not enabled":
-		c.forgetAPIVersion()
+	case (apiErr.StatusCode == 400 || apiErr.StatusCode == 422) && notEnabled(apiErr.Message, mode):
 		return &NotAvailableError{Feature: fillModeFeature(mode), Host: c.host, Err: err}
 	case apiErr.StatusCode == 422 && mode == PostOnly && strings.Contains(apiErr.Message, "would match with your other order"):
 		return &PostOnlyWouldMatchError{Reason: "match_with_self", Err: err}
 	}
 	// A 422 naming the fill mode already matches ErrFillModeNotAllowed.
 	return nil
+}
+
+// notEnabled reports whether msg is the exchange saying mode is not enabled.
+func notEnabled(msg, mode string) bool {
+	return msg == "fill_mode "+mode+" is not enabled" || strings.HasPrefix(msg, "The "+mode+" fill mode is not enabled")
 }
 
 // PostOnlyWouldMatchError reports a [PostOnly] order that would have matched

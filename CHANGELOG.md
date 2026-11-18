@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0 (2026-11-18)
+
+- Post-only and fill-or-kill orders are sent as they are, and the exchange decides. Where a mode is not enabled the exchange rejects the order and the call returns a `*stx.NotAvailableError` (`orders.post_only` or `orders.fill_or_kill`, matching `stx.ErrNotAvailable`), as before. The client no longer asks `GET /api_version` before sending one. An exchange on a release from before fill modes places the order as a normal limit order. Which exchanges offer each mode: https://docs.stxapp.io/concepts/order-types/
+- Breaking: `Client.SupportsFillMode`, `stx.FeatureOrdersPostOnly` and `stx.FeatureOrdersFillOrKill` are removed, and `Client.Capabilities` no longer reports `orders.post_only` or `orders.fill_or_kill`.
+
 ## 0.2.1 (2026-11-17)
 
 - `APIError.Reference` on a request blocked by the firewall in front of the API is now the request's id from the `x-amz-cf-id` response header, the value support looks the block up by. 0.2.0 returned the firewall's placeholder text instead.
