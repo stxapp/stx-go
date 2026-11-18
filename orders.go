@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"slices"
 )
 
 // Order actions, types and expirations.
@@ -45,6 +46,12 @@ type OrderRequest struct {
 	// heartbeating.
 	CancelOnDisconnect *bool  `json:"cancel_on_disconnect,omitempty"`
 	DeviceID           string `json:"device_id,omitempty"`
+	// FillMode is how a limit order matches: [FillNormal] (the default),
+	// [PostOnly] or [FillOrKill]. Before sending PostOnly or FillOrKill the
+	// client checks that the exchange offers it ([Client.SupportsFillMode])
+	// and returns a *[NotAvailableError] without sending anything when it
+	// does not.
+	FillMode string `json:"fill_mode,omitempty"`
 }
 
 func (o OrderRequest) check() error {
@@ -74,11 +81,34 @@ func (o OrderRequest) check() error {
 // A POST is never retried after a 5xx or a dropped connection; set
 // ClientOrderID and look the order up with [OrdersService.List] if that
 // happens.
+//
+// With FillMode [PostOnly] or [FillOrKill], Place first checks that the
+// exchange offers the mode and returns an error matching [ErrNotAvailable]
+// without sending anything when it does not. A market that does not take the
+// mode, such as a combination market, returns an error matching
+// [ErrFillModeNotAllowed]; a post-only order that would have matched returns
+// a *[PostOnlyWouldMatchError].
 func (s *OrdersService) Place(ctx context.Context, order OrderRequest) (*Order, error) {
 	if err := order.check(); err != nil {
 		return nil, err
 	}
-	return doOne[*Order](ctx, s.c, "orders_post", callArgs{body: order})
+	if !specialFillMode(order.FillMode) {
+		return doOne[*Order](ctx, s.c, "orders_post", callArgs{body: order})
+	}
+	if err := s.c.requireFillMode(ctx, order.FillMode); err != nil {
+		return nil, err
+	}
+	placed, err := doOne[*Order](ctx, s.c, "orders_post", callArgs{body: order})
+	if err != nil {
+		if mapped := s.c.fillModeError(err, order.FillMode); mapped != nil {
+			return nil, mapped
+		}
+		return nil, err
+	}
+	if order.FillMode == PostOnly && placed != nil && placed.Status == "cancelled" && placed.CancellationReason == "auto_matching" {
+		return nil, &PostOnlyWouldMatchError{Reason: "auto_matching", Order: placed}
+	}
+	return placed, nil
 }
 
 // BatchOrderResult is one entry of [OrdersService.PlaceBatch]: the placed
@@ -94,16 +124,41 @@ func (r BatchOrderResult) OK() bool { return r.Order != nil && len(r.Errors) == 
 // PlaceBatch places several orders in one call (POST
 // /api/v1/orders/batched). It returns one result per order, in order; a
 // rejected order carries Errors and does not stop the others.
+//
+// When any order sets FillMode [PostOnly] or [FillOrKill], PlaceBatch first
+// checks that the exchange offers each mode and returns an error matching
+// [ErrNotAvailable] without sending anything when one is missing. In a batch
+// a post-only order that would have matched comes back as its result: a
+// cancelled Order (CancellationReason "auto_matching") or Errors.
 func (s *OrdersService) PlaceBatch(ctx context.Context, orders []OrderRequest) ([]BatchOrderResult, error) {
+	var modes []string
 	for i, o := range orders {
 		if err := o.check(); err != nil {
 			return nil, fmt.Errorf("order %d: %w", i, err)
+		}
+		if specialFillMode(o.FillMode) && !slices.Contains(modes, o.FillMode) {
+			modes = append(modes, o.FillMode)
+		}
+	}
+	for _, mode := range modes {
+		if err := s.c.requireFillMode(ctx, mode); err != nil {
+			return nil, err
 		}
 	}
 	body := struct {
 		Orders []OrderRequest `json:"orders"`
 	}{orders}
-	return doOne[[]BatchOrderResult](ctx, s.c, "orders_batched_post", callArgs{body: body})
+	results, err := doOne[[]BatchOrderResult](ctx, s.c, "orders_batched_post", callArgs{body: body})
+	if err != nil {
+		for _, mode := range modes {
+			var na *NotAvailableError
+			if mapped := s.c.fillModeError(err, mode); errors.As(mapped, &na) {
+				return nil, mapped
+			}
+		}
+		return nil, err
+	}
+	return results, nil
 }
 
 // Get returns one of your orders (GET /api/v1/orders/{order_id}).

@@ -50,6 +50,26 @@ var (
 	// timeout). The error also wraps the underlying network error.
 	ErrTransport = errors.New("stx: transport error")
 
+	// ErrBlocked: 403 from the edge firewall in front of the API, before the
+	// request reached the exchange; see APIError.Code and
+	// APIError.Reference. Never retried. Also matches ErrForbidden.
+	ErrBlocked = errors.New("stx: blocked")
+	// ErrRestrictedJurisdiction: blocked because the request came from a
+	// location the exchange does not serve. Also matches ErrBlocked.
+	ErrRestrictedJurisdiction = errors.New("stx: restricted jurisdiction")
+	// ErrUnusualNetwork: blocked because the request came through a network
+	// the exchange does not accept traffic from, such as an anonymizing
+	// proxy. Also matches ErrBlocked.
+	ErrUnusualNetwork = errors.New("stx: unusual network")
+
+	// ErrFillModeNotAllowed: 422, the market does not take the order's fill
+	// mode. Combination markets take neither post_only nor fill_or_kill.
+	// Also matches ErrRejected.
+	ErrFillModeNotAllowed = errors.New("stx: fill mode not allowed on this market")
+	// ErrPostOnlyWouldMatch: a post-only order would have matched on arrival,
+	// so the exchange did not rest it; see *PostOnlyWouldMatchError.
+	ErrPostOnlyWouldMatch = errors.New("stx: post-only order would match")
+
 	// ErrNotAvailable: this exchange does not have the feature yet, for
 	// example combos where they are not switched on. Nothing is wrong with the
 	// request or the credentials; see *NotAvailableError for the feature.
@@ -81,8 +101,15 @@ type APIError struct {
 	// TermsURL is the page where the member accepts the terms, on a
 	// terms-required answer.
 	TermsURL string
+	// Reference identifies a block by the edge firewall in front of the API
+	// (a 403 matching ErrBlocked, or a 429 with Code "rate_limited"): the
+	// request's CloudFront id, from the x-amz-cf-id response header. Quote it
+	// when you contact support.
+	Reference string
 
 	bearerError string
+	// edge is set when the edge firewall, not the exchange, answered.
+	edge bool
 }
 
 // Error returns "stx: METHOD PATH: STATUS: message".
@@ -101,6 +128,14 @@ func (e *APIError) Is(target error) bool {
 		return e.StatusCode == 401 && e.bearerError == "invalid_token"
 	case ErrForbidden:
 		return e.StatusCode == 403
+	case ErrBlocked:
+		return e.StatusCode == 403 && e.edge
+	case ErrRestrictedJurisdiction:
+		return e.StatusCode == 403 && e.edge && e.Code == "restricted_jurisdiction"
+	case ErrUnusualNetwork:
+		return e.StatusCode == 403 && e.edge && e.Code == "unusual_network"
+	case ErrFillModeNotAllowed:
+		return e.StatusCode == 422 && fillModeRefusedRe.MatchString(e.Message)
 	case ErrInsufficientScope:
 		return e.StatusCode == 403 && (e.bearerError == "insufficient_scope" || strings.Contains(strings.ToLower(e.Message), "insufficient scope"))
 	case ErrTermsRequired:
@@ -138,7 +173,8 @@ func (e *APIError) missingRoute() bool {
 type NotAvailableError struct {
 	// Feature is a stable id: "combos", "markets.create", "market_types",
 	// "event_players", "leaderboard", "oauth", "oauth.member", "oauth.app",
-	// "connect", "terms.stx_page", "loyalty", or "scope:<name>".
+	// "connect", "terms.stx_page", "loyalty", "orders.post_only",
+	// "orders.fill_or_kill", or "scope:<name>".
 	Feature string
 	// Host is the exchange that lacks it, for example "demo.stxapp.ca".
 	Host string
@@ -147,17 +183,19 @@ type NotAvailableError struct {
 }
 
 var featurePhrases = map[string]string{
-	"oauth":          "OAuth is",
-	"loyalty":        "The loyalty program is",
-	"oauth.member":   "Member sign-in with OAuth is",
-	"oauth.app":      "App tokens are",
-	"connect":        "Sign in with STX is",
-	"terms.stx_page": "Accepting terms on an STX page is",
-	"markets.create": "Creating markets is",
-	"market_types":   "Market types are",
-	"event_players":  "Event players are",
-	"leaderboard":    "The leaderboard is",
-	"combos":         "Combos are",
+	"oauth":               "OAuth is",
+	"loyalty":             "The loyalty program is",
+	"oauth.member":        "Member sign-in with OAuth is",
+	"oauth.app":           "App tokens are",
+	"connect":             "Sign in with STX is",
+	"terms.stx_page":      "Accepting terms on an STX page is",
+	"markets.create":      "Creating markets is",
+	"market_types":        "Market types are",
+	"event_players":       "Event players are",
+	"leaderboard":         "The leaderboard is",
+	"combos":              "Combos are",
+	"orders.post_only":    "Post-only orders are",
+	"orders.fill_or_kill": "Fill-or-kill orders are",
 }
 
 // Error returns a sentence such as "stx: Combos are not available on
@@ -247,8 +285,51 @@ func newAPIError(status int, method, path string, body []byte, header func(strin
 	if status == 429 {
 		e.RetryAfter = parseRetryAfter(header("Retry-After"))
 	}
+	if (status == 403 || status == 429) && header("X-Stx-Error") == "" {
+		switch {
+		case edgeReasons[errText]:
+			// {"error", "message", "reference"} from the edge firewall.
+			e.edge = true
+			e.Code = errText
+			if m, ok := fields["message"].(string); ok && m != "" {
+				e.Message = m
+			}
+			e.Reference = edgeReference(header, fields)
+		case status == 403 && fields == nil:
+			// A 403 with no JSON body never comes from the exchange.
+			e.edge = true
+			e.Code = "blocked"
+			e.Message = bareBlockMessage
+			e.Reference = edgeReference(header, nil)
+		}
+	}
 	return e
 }
+
+// edgeReference is the id support looks a block up by: the CloudFront
+// request id in the x-amz-cf-id header. The firewall's JSON body is static,
+// so its reference field only names that header; it is used only when it
+// holds a real value and the header is missing.
+func edgeReference(header func(string) string, fields map[string]any) string {
+	if id := strings.TrimSpace(header("X-Amz-Cf-Id")); id != "" {
+		return id
+	}
+	if ref, _ := fields["reference"].(string); ref != "" && !strings.Contains(ref, " ") {
+		return ref
+	}
+	return ""
+}
+
+// edgeReasons are the error values the edge firewall answers with.
+var edgeReasons = map[string]bool{"restricted_jurisdiction": true, "unusual_network": true, "rate_limited": true}
+
+const bareBlockMessage = "the request was blocked before it reached the exchange (HTTP 403 without a JSON body). " +
+	"The API refuses requests that carry no User-Agent header: this client always sends one, so check that no proxy " +
+	"or custom http.RoundTripper removes it"
+
+// fillModeRefusedRe is the 422 a market answers for a fill mode it does not
+// take.
+var fillModeRefusedRe = regexp.MustCompile(`does not accept the [a-z_]+ fill mode`)
 
 var codeRe = regexp.MustCompile(`^[a-z][a-z0-9_.]*$`)
 

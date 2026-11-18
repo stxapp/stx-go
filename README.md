@@ -27,6 +27,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 
@@ -78,6 +79,29 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Println("canceled", canceled.OrderID, canceled.Status)
+
+	// Rest only as a maker. Where the exchange has no post-only orders nothing is
+	// sent and the error matches stx.ErrNotAvailable; one that would match is a
+	// *stx.PostOnlyWouldMatchError.
+	maker, err := client.Orders.Place(ctx, stx.OrderRequest{
+		MarketID:  page.Items[0].MarketID,
+		Action:    stx.Buy,
+		OrderType: stx.Limit,
+		Price:     stx.MustDecimal("0.01"),
+		Quantity:  stx.MustDecimal("1"),
+		FillMode:  stx.PostOnly,
+	})
+	switch {
+	case errors.Is(err, stx.ErrNotAvailable), errors.Is(err, stx.ErrPostOnlyWouldMatch):
+		fmt.Println("post-only not placed:", err)
+	case err != nil:
+		log.Fatal(err)
+	default:
+		fmt.Println("resting", maker.ID, maker.FillMode)
+		if _, err := client.Orders.Cancel(ctx, maker.ID); err != nil {
+			log.Fatal(err)
+		}
+	}
 }
 ```
 
@@ -89,6 +113,7 @@ STXNBA-26OCT102000LALGSW-GAMELAL bid 0.4400 offer 0.4700
 STXNBA-26OCT102000LALGSW-PTSLALLJAMES23-24.5 bid 0.5100 offer 0.5500
 placed 8f023ead-6f2d-4cf5-9931-cd217e44a2ee accepted
 canceled 8f023ead-6f2d-4cf5-9931-cd217e44a2ee cancelled
+resting 0f7d3a52-58c4-4f6b-a3e3-2b8e0c5b8e61 post_only
 ```
 
 Placing an order needs a key with write access. Every call takes a `context.Context` and is safe to make from many goroutines on one client. Prices and quantities are `stx.Decimal` strings, never floats. Lists come back a page at a time (`List`), or as an iterator over every page (`All`). Errors from the exchange are `*stx.APIError`; check them with `errors.Is` against `stx.ErrRejected`, `stx.ErrNotFound`, `stx.ErrRateLimited` and the other sentinels, or `stx.ErrNotAvailable` for a feature an exchange does not offer.

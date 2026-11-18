@@ -17,15 +17,20 @@ import (
 // only. POST and PATCH are never repeated after a 5xx or a dropped
 // connection, because the order may already be on the book; set
 // OrderRequest.ClientOrderID and look the order up instead. Nothing else is
-// retried. Backoff is exponential with jitter, capped at MaxBackoff; a
-// Retry-After header on a 429 sets the wait.
+// retried: a 403, including one from the edge firewall ([ErrBlocked]), fails
+// the same way the second time. Backoff is exponential with jitter, capped at
+// MaxBackoff. A Retry-After header on a 429 sets the wait in full; when it
+// asks for longer than MaxBackoff, the call is not retried and the error,
+// with APIError.RetryAfter, is returned rather than retrying before the
+// rate-limit window ends.
 type RetryPolicy struct {
 	// MaxAttempts is the total number of tries, including the first. Values
 	// below 1 mean 1.
 	MaxAttempts int
 	// InitialBackoff is the wait before the first retry.
 	InitialBackoff time.Duration
-	// MaxBackoff caps any one wait, including one set by Retry-After.
+	// MaxBackoff caps any one backoff. A Retry-After longer than this is not
+	// waited out: the 429 is returned instead.
 	MaxBackoff time.Duration
 	// NoJitter turns off the randomization of each wait (between 50% and
 	// 100% of its value).
@@ -46,6 +51,10 @@ func (p RetryPolicy) shouldRetry(err error, attempt int, idempotent bool) bool {
 		return false
 	}
 	if errors.Is(err, ErrRateLimited) {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && p.MaxBackoff > 0 && apiErr.RetryAfter > p.MaxBackoff {
+			return false
+		}
 		return true
 	}
 	return idempotent && (errors.Is(err, ErrServer) || errors.Is(err, ErrTransport))
@@ -55,9 +64,6 @@ func (p RetryPolicy) shouldRetry(err error, attempt int, idempotent bool) bool {
 func (p RetryPolicy) backoff(attempt int, err error) time.Duration {
 	var apiErr *APIError
 	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusTooManyRequests && apiErr.RetryAfter > 0 {
-		if p.MaxBackoff > 0 {
-			return min(apiErr.RetryAfter, p.MaxBackoff)
-		}
 		return apiErr.RetryAfter
 	}
 	d := p.InitialBackoff << (attempt - 1)

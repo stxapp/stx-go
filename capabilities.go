@@ -23,12 +23,19 @@ const (
 	FeatureEventPlayers  = "event_players"
 	FeatureLeaderboard   = "leaderboard"
 	FeatureCombos        = "combos"
+	// FeatureOrdersPostOnly: GET /api_version lists "order_post_only" in
+	// its features. No features field, or no /api_version, means no.
+	FeatureOrdersPostOnly = "orders.post_only"
+	// FeatureOrdersFillOrKill: GET /api_version lists "order_fill_or_kill",
+	// decided the same way.
+	FeatureOrdersFillOrKill = "orders.fill_or_kill"
 )
 
 // Features returns every feature id [Client.Capabilities] reports.
 func Features() []string {
 	return []string{FeatureOAuth, FeatureOAuthMember, FeatureOAuthApp, FeatureConnect, FeatureTermsSTXPage,
-		FeatureMarketsCreate, FeatureMarketTypes, FeatureEventPlayers, FeatureLeaderboard, FeatureCombos}
+		FeatureMarketsCreate, FeatureMarketTypes, FeatureEventPlayers, FeatureLeaderboard, FeatureCombos,
+		FeatureOrdersPostOnly, FeatureOrdersFillOrKill}
 }
 
 // memberScopes: any one of them in scopes_supported means members can
@@ -166,11 +173,13 @@ func (c *Client) rawGet(ctx context.Context, path string, signed bool) *rawAnswe
 }
 
 func (c *Client) discoverCapabilities(ctx context.Context) *Capabilities {
-	var version, discovery, types, players, board *rawAnswer
+	var version *apiVersion
+	var versionErr error
+	var discovery, types, players, board *rawAnswer
 	var combos *bool
 	var wg sync.WaitGroup
 	run := func(f func()) { wg.Add(1); go func() { defer wg.Done(); f() }() }
-	run(func() { version = c.rawGet(ctx, "/api_version", false) })
+	run(func() { version, versionErr = c.apiVersionInfo(ctx, true) })
 	run(func() { discovery = c.rawGet(ctx, "/.well-known/oauth-authorization-server", false) })
 	run(func() { types = c.rawGet(ctx, "/api/v1/types", true) })
 	run(func() { players = c.rawGet(ctx, "/api/v1/events/"+nobody+"/players", true) })
@@ -181,8 +190,8 @@ func (c *Client) discoverCapabilities(ctx context.Context) *Capabilities {
 	wg.Wait()
 
 	caps := &Capabilities{Host: c.host, CheckedAt: time.Now(), Features: map[string]*bool{}}
-	if v, ok := version.object()["api_version"].(string); ok {
-		caps.APIVersion = v
+	if versionErr == nil {
+		caps.APIVersion = version.version
 	}
 	meta, known := oauthMetadataFrom(discovery)
 	scopes, grants := stringList(meta["scopes_supported"]), stringList(meta["grant_types_supported"])
@@ -229,6 +238,10 @@ func (c *Client) discoverCapabilities(ctx context.Context) *Capabilities {
 		f[FeatureLeaderboard] = ptr(false)
 	}
 	f[FeatureCombos] = combos
+	if versionErr == nil {
+		f[FeatureOrdersPostOnly] = ptr(slices.Contains(version.features, "order_"+PostOnly))
+		f[FeatureOrdersFillOrKill] = ptr(slices.Contains(version.features, "order_"+FillOrKill))
+	}
 	for _, id := range Features() {
 		if _, ok := f[id]; !ok {
 			f[id] = nil
