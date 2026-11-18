@@ -82,7 +82,8 @@ func main() {
 
 	// Rest only as a maker. Where the exchange has not enabled post-only orders
 	// it rejects the order and the error matches stx.ErrNotAvailable; one that
-	// would match is a *stx.PostOnlyWouldMatchError.
+	// would match is a *stx.PostOnlyWouldMatchError. An exchange without fill
+	// modes may place it as a normal order: check FillMode on what comes back.
 	maker, err := client.Orders.Place(ctx, stx.OrderRequest{
 		MarketID:  page.Items[0].MarketID,
 		Action:    stx.Buy,
@@ -97,7 +98,11 @@ func main() {
 	case err != nil:
 		log.Fatal(err)
 	default:
-		fmt.Println("resting", maker.ID, maker.FillMode)
+		if maker.FillMode != stx.PostOnly {
+			fmt.Println("placed as a normal order, cancelling")
+		} else {
+			fmt.Println("resting", maker.ID, maker.FillMode)
+		}
 		if _, err := client.Orders.Cancel(ctx, maker.ID); err != nil {
 			log.Fatal(err)
 		}

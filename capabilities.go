@@ -23,12 +23,28 @@ const (
 	FeatureEventPlayers  = "event_players"
 	FeatureLeaderboard   = "leaderboard"
 	FeatureCombos        = "combos"
+
+	// FeatureOrdersPostOnly is the id of post-only orders.
+	//
+	// Deprecated: the exchange no longer publishes whether it takes
+	// post-only orders, so [Client.Capabilities] always reports this id as
+	// nil (not known). Send the order with [PostOnly] and handle an error
+	// matching [ErrNotAvailable]. An exchange on a release from before fill
+	// modes may place the order as a normal limit order.
+	FeatureOrdersPostOnly = "orders.post_only"
+	// FeatureOrdersFillOrKill is the id of fill-or-kill orders.
+	//
+	// Deprecated: reported as nil (not known), as [FeatureOrdersPostOnly].
+	// Send the order with [FillOrKill] and handle an error matching
+	// [ErrNotAvailable].
+	FeatureOrdersFillOrKill = "orders.fill_or_kill"
 )
 
 // Features returns every feature id [Client.Capabilities] reports.
 func Features() []string {
 	return []string{FeatureOAuth, FeatureOAuthMember, FeatureOAuthApp, FeatureConnect, FeatureTermsSTXPage,
-		FeatureMarketsCreate, FeatureMarketTypes, FeatureEventPlayers, FeatureLeaderboard, FeatureCombos}
+		FeatureMarketsCreate, FeatureMarketTypes, FeatureEventPlayers, FeatureLeaderboard, FeatureCombos,
+		FeatureOrdersPostOnly, FeatureOrdersFillOrKill}
 }
 
 // memberScopes: any one of them in scopes_supported means members can
@@ -231,6 +247,8 @@ func (c *Client) discoverCapabilities(ctx context.Context) *Capabilities {
 		f[FeatureLeaderboard] = ptr(false)
 	}
 	f[FeatureCombos] = combos
+	// FeatureOrdersPostOnly and FeatureOrdersFillOrKill stay nil: nothing
+	// the exchange publishes says whether it takes them.
 	for _, id := range Features() {
 		if _, ok := f[id]; !ok {
 			f[id] = nil

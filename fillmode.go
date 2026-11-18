@@ -31,6 +31,19 @@ func fillModeFeature(mode string) string { return "orders." + mode }
 // normal order.
 func specialFillMode(mode string) bool { return mode != "" && mode != FillNormal }
 
+// SupportsFillMode no longer checks anything and always returns true and a
+// nil error, without a request.
+//
+// Deprecated: the exchange no longer publishes which fill modes it takes.
+// Send the order with the mode and handle the answer: where the mode is not
+// enabled the exchange rejects the order and the call returns an error
+// matching [ErrNotAvailable]. An exchange on a release from before fill modes
+// may instead place the order as a normal limit order; check
+// [Order.FillMode] on the placed order. mode and refresh are ignored.
+func (c *Client) SupportsFillMode(ctx context.Context, mode string, refresh bool) (bool, error) {
+	return true, nil
+}
+
 // apiVersion is the build GET /api_version names, "" when the exchange
 // does not serve the route.
 type apiVersion struct {

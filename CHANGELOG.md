@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1 (2026-11-18)
+
+- Code written for 0.2.x compiles and runs again. `Client.SupportsFillMode`, `stx.FeatureOrdersPostOnly` and `stx.FeatureOrdersFillOrKill` are back, deprecated. `SupportsFillMode` no longer checks anything: it returns true without a request, so send the order and handle an error matching `stx.ErrNotAvailable`. `Client.Capabilities` lists `orders.post_only` and `orders.fill_or_kill` again, always as nil (not known), since the exchange does not publish which fill modes it takes.
+- An exchange without fill modes may place a post-only or fill-or-kill order as a normal limit order instead of rejecting it. Check the placed order's `FillMode` and cancel it when it is not the mode you sent. See https://docs.stxapp.io/sdks/go/trading/#post-only-and-fill-or-kill
+
 ## 0.3.0 (2026-11-18)
 
 - Post-only and fill-or-kill orders are sent as they are, and the exchange decides. Where a mode is not enabled the exchange rejects the order and the call returns a `*stx.NotAvailableError` (`orders.post_only` or `orders.fill_or_kill`, matching `stx.ErrNotAvailable`), as before. The client no longer asks `GET /api_version` before sending one. An exchange on a release from before fill modes places the order as a normal limit order. Which exchanges offer each mode: https://docs.stxapp.io/concepts/order-types/
